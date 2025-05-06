@@ -9,26 +9,92 @@ function App() {
 
   const handleSend = async () => {
     if (!input.trim()) return;
+    
     const userMessage = { sender: 'user', text: input };
     setMessages(prev => [...prev, userMessage]);
     setProcessing(true);
-
+  
     try {
       const response = await fetch('http://127.0.0.1:5000/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: input })
       });
+      
       const data = await response.json();
-      const botMessage = { sender: 'bot', text: data.answer || "No answer returned: Please process PDFs first." };
+      const botMessage = { 
+        sender: 'bot', 
+        text: data.response || "No answer available",
+        source: data.source || 'unknown',
+        sources: data.sources || [],
+        lawyerRecommendation: data.lawyer_recommendation || [] // Including lawyer info
+      };
+      
       setMessages(prev => [...prev, botMessage]);
+  
+      if (data.lawyer_recommendation) {
+        // Display lawyer recommendations if available
+        setMessages(prev => [
+          ...prev,
+          {
+            sender: 'bot',
+            text: "Lawyer Recommendations:",
+            sources: data.lawyer_recommendation.map(lawyer => `${lawyer.name}, ${lawyer.specialization}, located at ${lawyer.address}`).join("\n"),
+            source: 'lawyer_info'
+          }
+        ]);
+      }
+  
     } catch (error) {
       console.error("Error calling backend:", error);
-      setMessages(prev => [...prev, { sender: 'bot', text: "Error getting response" }]);
+      setMessages(prev => [...prev, { 
+        sender: 'bot', 
+        text: "Error getting response",
+        source: 'error'
+      }]);
     }
+  
     setInput("");
     setProcessing(false);
   };
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    setUploading(true);
+    const formData = new FormData();
+    formData.append('pdf', file);
+
+    try {
+      const response = await fetch('http://127.0.0.1:5000/process-pdf', {
+        method: 'POST',
+        body: formData
+      });
+      
+      const data = await response.json();
+      if (data.status === 'success') {
+        setMessages(prev => [...prev, {
+          sender: 'system',
+          text: `PDF processed successfully (${data.chunks_processed} chunks)`,
+          source: 'system'
+        }]);
+      } else {
+        throw new Error(data.error || "Processing failed");
+      }
+    } catch (error) {
+      console.error("Error processing PDF:", error);
+      setMessages(prev => [...prev, {
+        sender: 'system',
+        text: `PDF processing error: ${error.message}`,
+        source: 'error'
+      }]);
+    }
+    
+    setUploading(false);
+    e.target.value = ''; // Reset file input
+  };
+
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -37,34 +103,10 @@ function App() {
     }
   };
 
-  const handleFileUpload = async (e) => {
-    const files = e.target.files;
-    if (files.length === 0) return;
-
-    setUploading(true);
-    const formData = new FormData();
-    for (let file of files) {
-      formData.append('pdfs', file);
-    }
-    try {
-      const response = await fetch('http://127.0.0.1:5000/process', {
-        method: 'POST',
-        body: formData
-      });
-      const data = await response.json();
-      console.log("Process response:", data);
-      alert(data.message || "PDF processed successfully.");
-    } catch (error) {
-      console.error("Error processing PDF:", error);
-      alert("Error processing PDF");
-    }
-    setUploading(false);
-  };
-
   return (
     <div className="App">
       <div className="chat-wrapper">
-        <div className="chat-header">Qroup 4 LLM Chatbox</div>
+        <div className="chat-header">LegalCompass</div>
         <div className="chat-content">
           {messages.map((msg, index) => (
             <div key={index} className={`message ${msg.sender === 'user' ? 'user-message' : 'bot-message'}`}>
