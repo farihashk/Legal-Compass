@@ -9,12 +9,20 @@ from langchain_huggingface import HuggingFaceEndpoint, HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone
 import os
-
+import pandas as pd
+import re
 app = Flask(__name__)
 CORS(app)
 
 load_dotenv()
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
+
+lawyer_data = pd.read_csv("../data/wills_lawyers.csv", encoding="utf-8")
+
+@app.route("/lawyers", methods = ["GET"])
+def get_will_lawyers():
+    result = lawyer_data.to_dict(orient = "records")
+    return jsonify(result)
 
 @app.after_request
 def after_request(response):
@@ -38,6 +46,7 @@ embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-
 
 conversation_chain = None
 vectorstore = None
+
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index("legal-compass") 
 
@@ -110,14 +119,14 @@ def process_pdf():
                 'id': f"chunk_{i}",
                 'values': vector,
                 'metadata': {
-                    'text': chunk,
+                    'chunk_text': chunk,
                     'source': request.files['pdf'].filename
                 }
             })
-        
+        index.upsert(vectors=vectors, namespace=namespace)
         # Update the conversation chain
         global conversation_chain, vectorstore
-        conversation_chain = get_conversation_chain(vectorstore)
+        conversation_chain = get_conversation_chain(persistent_vectorstore)
         
         return jsonify({
             'status': 'success',
@@ -127,41 +136,59 @@ def process_pdf():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+def format_chunks(chunks):
+    formatted = []
+    for doc in chunks:
+        text = doc.metadata.get("chunk_text", "")
+        if text:
+            source = doc.metadata.get("source", "unknown")
+            formatted.append(f"Source: {source}\n{text}")
+    return "\n\n".join(formatted)
+    
+
 @app.route("/ask", methods=["POST"])
 def ask():
     user_question = request.json["question"]
     
     # Step 1: Search legal info
     legal_chunks = []
-    for ns in ["federal_law_code", "california_law_case", "reddit_post"]:
-        legal_chunks.extend(persistent_vectorstore.similarity_search(user_question, namespace=ns, k=3))
+    legal_chunks.extend(persistent_vectorstore.similarity_search(user_question, namespace="california_law_code", k=3))
     
-    # Step 2: Search lawyer info
-    lawyer_chunks = persistent_vectorstore.similarity_search(
-        query=user_question,
-        namespace="default",
-        k=3
-    )
+
+    # Step 3: Format chunks separately for clarity
+    legal_context = format_chunks(legal_chunks)
     
-    # Step 3: Compose prompt
+    # Step 4: Compose prompt
     context = f"""
-    You are a helpful legal assistant. Provide legal context and suggest lawyers if available.
+    You are a helpful and professional legal assistant with knowledge of federal and California law.
+
+    Do not simply repeat the laws. Instead, explain them in a way a non-lawyer can understand—using everyday language and natural, conversational paragraphs.
+
+    Only quote short parts of the law if absolutely necessary to support your explanation. Otherwise, focus on providing a useful, easy-to-understand answer.
+
+    Legal Context:
+    {legal_context if legal_context else "No specific legal texts were retrieved. Provide a general explanation based on standard California trust and probate law."}
 
     User Question:
     {user_question}
-
-    Legal Information:
-    {''.join([chunk.page_content for chunk in legal_chunks])}
-
-    Lawyer Recommendations:
-    {''.join([chunk.page_content for chunk in lawyer_chunks])}
     """
         
-    # Step 4: Call LLM
+    # Step 5: Call LLM
     response = llm.invoke(context)
+    print("response:", response)
     
-    return jsonify({"response": response})
+    # Step 6: Handle empty or invalid response
+    cleaned_response = re.sub(r'^-+\n*|\n*-+$', '', response).strip()
+    print("Cleaned Response:", cleaned_response)
+
+    
+    # Step 7: Return the cleaned response
+    return jsonify({"response": cleaned_response})
 
 if __name__ == '__main__':
     app.run(debug=True)
+
+
+
+    
 
