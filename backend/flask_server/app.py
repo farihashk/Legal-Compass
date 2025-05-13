@@ -38,7 +38,7 @@ llm = HuggingFaceEndpoint(
     temperature=0.1,
     huggingfacehub_api_token=os.getenv("HUGGINGFACE_API_TOKEN"),
     model_kwargs={
-        "max_length": 1024
+        "max_length": 2048
     }
 )
 
@@ -136,14 +136,20 @@ def process_pdf():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def format_chunks(chunks):
+def format_chunks(chunks, max_chars=1500):
     formatted = []
+    total_chars = 0
     for doc in chunks:
         text = doc.metadata.get("chunk_text", "")
         if text:
             source = doc.metadata.get("source", "unknown")
-            formatted.append(f"Source: {source}\n{text}")
+            chunk_text = f"Source: {source}\n{text}"
+            if total_chars + len(chunk_text) <= max_chars:
+                formatted.append(chunk_text)
+                total_chars += len(chunk_text)
     return "\n\n".join(formatted)
+
+
     
 
 @app.route("/ask", methods=["POST"])
@@ -151,38 +157,51 @@ def ask():
     user_question = request.json["question"]
     
     # Step 1: Search legal info
-    legal_chunks = []
-    legal_chunks.extend(persistent_vectorstore.similarity_search(user_question, namespace="california_law_code", k=3))
+    legal_chunks = persistent_vectorstore.similarity_search(user_question, namespace="california_law_code", k=3)
     
+    # Step 2: Check if legal_chunks are empty or lack valid content
+    if legal_chunks and any(doc.metadata.get("chunk_text", "") for doc in legal_chunks):
+        legal_context = format_chunks(legal_chunks)
+        # Prompt with legal context
+        context = f"""
+        You are a helpful and professional legal assistant with knowledge of federal and California law.
 
-    # Step 3: Format chunks separately for clarity
-    legal_context = format_chunks(legal_chunks)
+        Use the provided legal context to inform your answer.
+
+        Do not simply repeat the laws. Instead, explain them in a way a non-lawyer can understand—using everyday language and natural, conversational paragraphs.
+
+        Only quote short parts of the law if absolutely necessary to support your explanation. Otherwise, focus on providing a useful, easy-to-understand answer.
+
+        Legal Context:
+        {legal_context}
+
+        User Question:
+        {user_question}
+        """
+    else:
+        # Prompt without legal context
+        context = f"""
+        You are a helpful and professional legal assistant with knowledge of federal and California law.
+
+        No specific legal texts were retrieved. Provide a general explanation based on standard California trust and probate law.
+
+        Do not simply repeat the laws. Instead, explain them in a way a non-lawyer can understand—using everyday language and natural, conversational paragraphs.
+
+        Only quote short parts of the law if absolutely necessary to support your explanation. Otherwise, focus on providing a useful, easy-to-understand answer.
+
+        User Question:
+        {user_question}
+        """
     
-    # Step 4: Compose prompt
-    context = f"""
-    You are a helpful and professional legal assistant with knowledge of federal and California law.
-
-    Do not simply repeat the laws. Instead, explain them in a way a non-lawyer can understand—using everyday language and natural, conversational paragraphs.
-
-    Only quote short parts of the law if absolutely necessary to support your explanation. Otherwise, focus on providing a useful, easy-to-understand answer.
-
-    Legal Context:
-    {legal_context if legal_context else "No specific legal texts were retrieved. Provide a general explanation based on standard California trust and probate law."}
-
-    User Question:
-    {user_question}
-    """
-        
-    # Step 5: Call LLM
+    # Step 3: Call LLM
     response = llm.invoke(context)
-    print("response:", response)
+    print("Raw Response:", response)
     
-    # Step 6: Handle empty or invalid response
+    # Step 4: Clean response
     cleaned_response = re.sub(r'^-+\n*|\n*-+$', '', response).strip()
     print("Cleaned Response:", cleaned_response)
-
     
-    # Step 7: Return the cleaned response
+    # Step 5: Return the cleaned response
     return jsonify({"response": cleaned_response})
 
 if __name__ == '__main__':
