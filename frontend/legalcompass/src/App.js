@@ -1,138 +1,181 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import Papa from 'papaparse';
+import axios from 'axios';
+import LawyerMap from './components/LawyerMap';
 import './App.css';
 
+const API_BASE = process.env.REACT_APP_API_BASE || 'http://127.0.0.1:5000';
+
 function App() {
+  const [allLawyers, setAllLawyers] = useState([]);
+  const [lawyers, setLawyers] = useState([]);               // the 10 we display
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState('');
   const [processing, setProcessing] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(false);
+  const chatEndRef = useRef(null);
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
-    
-    const userMessage = { sender: 'user', text: input };
-    setMessages(prev => [...prev, userMessage]);
-    setProcessing(true);
-  
-    try {
-      const response = await fetch('http://127.0.0.1:5000/ask', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: input })
-      });
-      
-      const data = await response.json();
-      const botMessage = { 
-        sender: 'bot', 
-        text: data.response || "No answer available",
-        source: data.source || 'unknown',
-        sources: data.sources || [],
-        lawyerRecommendation: data.lawyer_recommendation || [] // Including lawyer info
-      };
-      
-      setMessages(prev => [...prev, botMessage]);
-  
-      if (data.lawyer_recommendation) {
-        // Display lawyer recommendations if available
-        setMessages(prev => [
-          ...prev,
-          {
-            sender: 'bot',
-            text: "Lawyer Recommendations:",
-            sources: data.lawyer_recommendation.map(lawyer => `${lawyer.name}, ${lawyer.specialization}, located at ${lawyer.address}`).join("\n"),
-            source: 'lawyer_info'
+  // 1) load and parse CSV once
+  useEffect(() => {
+    fetch('/wills_lawyers.csv')
+      .then(r => r.text())
+      .then(csv => {
+        Papa.parse(csv, {
+          header: true,
+          skipEmptyLines: true,
+          complete: results => {
+            // convert strings to numbers where needed:
+            const data = results.data.map(row => ({
+              ...row,
+              latitude: parseFloat(row.latitude),
+              longitude: parseFloat(row.longitude),
+              rating: parseFloat(row.rating),
+            }));
+            setAllLawyers(data);
           }
-        ]);
-      }
-  
-    } catch (error) {
-      console.error("Error calling backend:", error);
-      setMessages(prev => [...prev, { 
-        sender: 'bot', 
-        text: "Error getting response",
-        source: 'error'
-      }]);
+        });
+      })
+      .catch(console.error);
+  }, []);
+
+  // 2) auto‑scroll
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // 3) helper to pick 10 random lawyers
+  const pickRandom10 = () => {
+    const arr = [...allLawyers];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
     }
-  
-    setInput("");
+    return arr.slice(0, 10);
+  };
+
+  // 4) toggle overlay + randomize
+  const handleToggle = () => {
+    if (!showOverlay) {
+      setLawyers(pickRandom10());
+    }
+    setShowOverlay(v => !v);
+  };
+
+  // 5) send question
+  const sendQuestion = async () => {
+    if (!input.trim()) return;
+    setMessages(m => [...m, { sender: 'user', text: input }]);
+    setInput('');
+    setProcessing(true);
+    try {
+      const { data } = await axios.post(`${API_BASE}/ask`, { question: input });
+      setMessages(m => [...m, { sender: 'bot', text: data.response }]);
+      if (data.lawyer_recommendation?.length) {
+        setMessages(m => [...m, {
+          sender: 'bot',
+          text: 'Lawyer Recommendations:',
+          details: data.lawyer_recommendation
+        }]);
+      }
+    } catch {
+      setMessages(m => [...m, { sender: 'bot', text: 'Error fetching response' }]);
+    }
     setProcessing(false);
   };
 
-  const handleFileUpload = async (e) => {
+  // 6) upload PDF
+  const uploadPdf = async e => {
     const file = e.target.files[0];
     if (!file) return;
-
     setUploading(true);
-    const formData = new FormData();
-    formData.append('pdf', file);
-
+    const form = new FormData();
+    form.append('pdf', file);
     try {
-      const response = await fetch('http://127.0.0.1:5000/process-pdf', {
-        method: 'POST',
-        body: formData
-      });
-      
-      const data = await response.json();
-      if (data.status === 'success') {
-        setMessages(prev => [...prev, {
-          sender: 'system',
-          text: `PDF processed successfully (${data.chunks_processed} chunks)`,
-          source: 'system'
-        }]);
-      } else {
-        throw new Error(data.error || "Processing failed");
-      }
-    } catch (error) {
-      console.error("Error processing PDF:", error);
-      setMessages(prev => [...prev, {
+      const { data } = await axios.post(`${API_BASE}/process-pdf`, form);
+      setMessages(m => [...m, {
         sender: 'system',
-        text: `PDF processing error: ${error.message}`,
-        source: 'error'
+        text: `PDF processed (${data.chunks_processed} chunks)`
       }]);
+    } catch {
+      setMessages(m => [...m, { sender: 'system', text: 'PDF processing failed' }]);
     }
-    
     setUploading(false);
-    e.target.value = ''; // Reset file input
+    e.target.value = '';
   };
 
-
-  const handleKeyPress = (e) => {
+  const handleKey = e => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      sendQuestion();
     }
   };
 
   return (
-    <div className="App">
-      <div className="chat-wrapper">
-        <div className="chat-header">LegalCompass</div>
+    <div className="app-container">
+      <header className="app-header">
+        <button className="toggle-btn" onClick={handleToggle}>
+          {showOverlay ? 'Hide Lawyers & Map' : 'Show Lawyers & Map'}
+        </button>
+        <h1 className="app-title">LegalCompass Assistant</h1>
+      </header>
+
+      <main className="chat-wrapper">
+        {showOverlay && (
+          <div className="map-overlay">
+            <aside className="lawyer-list-panel">
+              <h3>Lawyers</h3>
+              <ul>
+                {lawyers.map(l => (
+                  <li key={l.id}>
+                    <a href={l.profile_url} target="_blank" rel="noreferrer">
+                      <strong>{l.name}</strong>
+                    </a><br/>
+                    {l.category}
+                  </li>
+                ))}
+              </ul>
+            </aside>
+            <div className="map-panel">
+              <LawyerMap lawyers={lawyers} />
+            </div>
+          </div>
+        )}
+
         <div className="chat-content">
-          {messages.map((msg, index) => (
-            <div key={index} className={`message ${msg.sender === 'user' ? 'user-message' : 'bot-message'}`}>
-              {msg.text}
+          {messages.map((msg, i) => (
+            <div key={i} className={`message ${msg.sender}`}>
+              <p>{msg.text}</p>
+              {msg.details && (
+                <ul className="detail-list">
+                  {msg.details.map((l, j) => (
+                    <li key={j}>{l.name} — {l.specialization}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           ))}
-          {processing && <div className="processing-indicator">Processing...</div>}
+          <div ref={chatEndRef} />
         </div>
-        <div className="chat-input-area">
-          <label className="file-upload">
-            Upload PDF
-            <input type="file" accept="application/pdf" multiple onChange={handleFileUpload} />
-          </label>
-          {uploading && <div className="uploading-indicator">Uploading...</div>}
+
+        <div className="controls">
+          <input
+            type="file"
+            accept="application/pdf"
+            onChange={uploadPdf}
+            disabled={uploading}
+          />
           <textarea
-            className="chat-input"
-            placeholder="Type your question..."
+            placeholder="Type your question…"
             value={input}
             onChange={e => setInput(e.target.value)}
-            onKeyPress={handleKeyPress}
+            onKeyDown={handleKey}
           />
-          <button className="send-button" onClick={handleSend} disabled={processing || uploading}>
-            {processing ? "Processing..." : "Send"}
+          <button onClick={sendQuestion} disabled={processing || uploading}>
+            {processing ? 'Thinking…' : 'Send'}
           </button>
         </div>
-      </div>
+      </main>
     </div>
   );
 }
