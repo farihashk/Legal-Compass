@@ -147,4 +147,4 @@ Fork the repository, create a feature branch, and submit a pull request with you
 MIT License. See the `LICENSE` file for details.
 
 ## Contact
-For questions, contact [your email] or open a GitHub issue.
+For questions, contact fariha.shaikh02@gmail.com or open a GitHub issue.
